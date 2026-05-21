@@ -54,6 +54,7 @@
   let error = $state<string | null>(null)
   let selectedThreadId = $state<string | null>(null)
   let lastLoadedFolderId = $state<string | null>(null) // Track folder changes
+  let loadGeneration = $state(0) // Invalidates stale async results on folder switch
 
   // Derived: check if this folder is currently syncing (from account store's progress tracking)
   const syncing = $derived(
@@ -304,6 +305,7 @@
 
     prevAccountId = currentAccount
     prevFolderId = currentFolder
+    loadGeneration++
     offset = 0
     checkedThreadIds = new Set()
     lastClickedIndex = null
@@ -359,18 +361,12 @@
     // For unified view, we don't need accountId/folderId
     if (!isUnifiedView && (!accountId || !folderId)) return
 
-    // Prevent concurrent loads — defer instead of dropping
-    if (loading) {
-      pendingReload = true
-      return
-    }
-
-    loading = true
     error = null
 
-    // Capture offset at start - it may change during async operations
+    // Capture offset and generation at start — these may change during async operations
     const currentOffset = offset
     const limit = customLimit ?? PAGE_SIZE
+    const generation = loadGeneration
 
     try {
       const [convList, count] = isUnifiedView
@@ -383,6 +379,8 @@
           GetConversationCount(accountId!, folderId!, filterMode),
         ])
 
+      // Discard stale results — folder was switched while this load was in-flight
+      if (generation !== loadGeneration) return
       if (currentOffset !== 0) {
         conversations = [...conversations, ...(convList || [])]
         totalCount = count
@@ -408,26 +406,24 @@
         pendingFlagChanges = []
       }
 
-      // Check if we switched to a different folder
-      const folderChanged = lastLoadedFolderId !== folderId
-      lastLoadedFolderId = folderId
-
       // Auto-select first message on folder navigation or initial load
       if (conversations.length === 0) {
         selectedThreadId = null
-      } else if (folderChanged || !selectedThreadId) {
+      } else {
         selectedThreadId = conversations[0].threadId
       }
       totalCount = count
     } catch (err) {
+      if (generation !== loadGeneration) return
       console.error('Failed to load messages:', err)
       error = $_('viewer.failedToLoadMessages')
     } finally {
       loading = false
-      // Flush any deferred reload (from sync event during load or dialog guard)
-      if (pendingReload && !isDialogGuardActive()) {
-        pendingReload = false
-        scheduleReload()
+      if (generation === loadGeneration) {
+        if (pendingReload && !isDialogGuardActive()) {
+          pendingReload = false
+          scheduleReload()
+        }
       }
     }
   }
